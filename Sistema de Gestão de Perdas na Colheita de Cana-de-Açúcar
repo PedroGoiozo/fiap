@@ -1,0 +1,637 @@
+import json
+import os
+import datetime
+import cx_Oracle
+
+# Estruturas de dados para armazenamento temporário (Cap. 4)
+# Lista para armazenar as colheitas
+colheitas = []
+# Dicionário para mapear máquinas colhedoras e suas estatísticas
+maquinas_colhedoras = {}
+# Tupla com os tipos de cana
+tipos_cana = ("RB867515", "SP80-1816", "SP80-3280", "CTC20", "IAC91-1099")
+
+# Funções (Cap. 3)
+
+def conectar_banco():
+    """
+    Função para conectar ao banco de dados Oracle
+    Retorna a conexão ou None em caso de erro
+    """
+    try:
+        # Os dados de conexão devem ser configurados de acordo com seu ambiente
+        conn = cx_Oracle.connect(
+            user="username",
+            password="password",
+            dsn="localhost:1521/orcl"
+        )
+        print("Conexão com o banco de dados estabelecida com sucesso.")
+        return conn
+    except cx_Oracle.Error as error:
+        print(f"Erro ao conectar ao banco de dados: {error}")
+        return None
+
+def criar_tabelas(conn):
+    """
+    Procedimento para criar as tabelas necessárias no banco de dados
+    """
+    try:
+        cursor = conn.cursor()
+        
+        # Criar tabela de colheitas
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS colheitas (
+            id NUMBER PRIMARY KEY,
+            data_colheita DATE,
+            area_hectares NUMBER(10,2),
+            producao_toneladas NUMBER(10,2),
+            perdas_toneladas NUMBER(10,2),
+            porcentagem_perda NUMBER(5,2),
+            tipo_cana VARCHAR2(20),
+            id_maquina NUMBER,
+            operador VARCHAR2(100)
+        )
+        ''')
+        
+        # Criar tabela de máquinas
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS maquinas (
+            id NUMBER PRIMARY KEY,
+            modelo VARCHAR2(100),
+            ano NUMBER(4),
+            ultima_manutencao DATE,
+            horas_uso NUMBER(10,2)
+        )
+        ''')
+        
+        conn.commit()
+        print("Tabelas criadas com sucesso!")
+        
+    except cx_Oracle.Error as error:
+        print(f"Erro ao criar tabelas: {error}")
+        conn.rollback()
+
+def salvar_colheita_banco(conn, colheita):
+    """
+    Função para salvar uma colheita no banco de dados
+    """
+    try:
+        cursor = conn.cursor()
+        
+        # Gerar ID (em um ambiente real, seria uma sequência do Oracle)
+        cursor.execute("SELECT NVL(MAX(id), 0) + 1 FROM colheitas")
+        novo_id = cursor.fetchone()[0]
+        
+        # Inserir na tabela
+        cursor.execute("""
+        INSERT INTO colheitas 
+        (id, data_colheita, area_hectares, producao_toneladas, perdas_toneladas, 
+        porcentagem_perda, tipo_cana, id_maquina, operador)
+        VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9)
+        """, (
+            novo_id,
+            colheita['data_colheita'],
+            colheita['area_hectares'],
+            colheita['producao_toneladas'],
+            colheita['perdas_toneladas'],
+            colheita['porcentagem_perda'],
+            colheita['tipo_cana'],
+            colheita['id_maquina'],
+            colheita['operador']
+        ))
+        
+        conn.commit()
+        print(f"Colheita ID {novo_id} salva no banco de dados com sucesso!")
+        return True
+        
+    except cx_Oracle.Error as error:
+        print(f"Erro ao salvar colheita no banco: {error}")
+        conn.rollback()
+        return False
+
+def carregar_colheitas_banco(conn):
+    """
+    Função para carregar todas as colheitas do banco de dados
+    Retorna uma lista de colheitas
+    """
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT id, data_colheita, area_hectares, producao_toneladas, 
+               perdas_toneladas, porcentagem_perda, tipo_cana, id_maquina, operador
+        FROM colheitas
+        ORDER BY data_colheita DESC
+        """)
+        
+        colheitas_banco = []
+        for row in cursor:
+            colheita = {
+                'id': row[0],
+                'data_colheita': row[1],
+                'area_hectares': row[2],
+                'producao_toneladas': row[3],
+                'perdas_toneladas': row[4],
+                'porcentagem_perda': row[5],
+                'tipo_cana': row[6],
+                'id_maquina': row[7],
+                'operador': row[8]
+            }
+            colheitas_banco.append(colheita)
+        
+        print(f"Carregadas {len(colheitas_banco)} colheitas do banco de dados.")
+        return colheitas_banco
+        
+    except cx_Oracle.Error as error:
+        print(f"Erro ao carregar colheitas do banco: {error}")
+        return []
+
+def registrar_colheita(usar_banco=False):
+    """
+    Função para registrar uma nova colheita
+    """
+    try:
+        print("\n=== Registro de Colheita ===")
+        
+        # Data de colheita (com validação)
+        while True:
+            try:
+                data_str = input("Data da colheita (DD/MM/AAAA): ")
+                data_colheita = datetime.datetime.strptime(data_str, "%d/%m/%Y").date()
+                break
+            except ValueError:
+                print("Formato de data inválido. Use DD/MM/AAAA.")
+        
+        # Área colhida (com validação)
+        while True:
+            try:
+                area_hectares = float(input("Área colhida em hectares: "))
+                if area_hectares <= 0:
+                    raise ValueError
+                break
+            except ValueError:
+                print("Valor inválido. Digite um número positivo.")
+        
+        # Produção em toneladas (com validação)
+        while True:
+            try:
+                producao_toneladas = float(input("Produção total em toneladas: "))
+                if producao_toneladas <= 0:
+                    raise ValueError
+                break
+            except ValueError:
+                print("Valor inválido. Digite um número positivo.")
+        
+        # Perdas em toneladas (com validação)
+        while True:
+            try:
+                perdas_toneladas = float(input("Perdas estimadas em toneladas: "))
+                if perdas_toneladas < 0 or perdas_toneladas > producao_toneladas:
+                    raise ValueError
+                break
+            except ValueError:
+                print("Valor inválido. Digite um número entre 0 e a produção total.")
+        
+        # Cálculo da porcentagem de perda
+        porcentagem_perda = (perdas_toneladas / (producao_toneladas + perdas_toneladas)) * 100
+        
+        # Tipo de cana (com validação)
+        print("Tipos de cana disponíveis:")
+        for i, tipo in enumerate(tipos_cana, 1):
+            print(f"{i}. {tipo}")
+        
+        while True:
+            try:
+                escolha = int(input("Selecione o tipo de cana (número): "))
+                if 1 <= escolha <= len(tipos_cana):
+                    tipo_cana = tipos_cana[escolha-1]
+                    break
+                else:
+                    raise ValueError
+            except ValueError:
+                print(f"Escolha inválida. Digite um número entre 1 e {len(tipos_cana)}.")
+        
+        # ID da máquina colhedora (com validação)
+        while True:
+            try:
+                id_maquina = int(input("ID da máquina colhedora: "))
+                if id_maquina <= 0:
+                    raise ValueError
+                break
+            except ValueError:
+                print("ID inválido. Digite um número positivo.")
+        
+        # Nome do operador
+        operador = input("Nome do operador: ")
+        
+        # Criar dicionário com os dados
+        colheita = {
+            'data_colheita': data_colheita,
+            'area_hectares': area_hectares,
+            'producao_toneladas': producao_toneladas,
+            'perdas_toneladas': perdas_toneladas,
+            'porcentagem_perda': porcentagem_perda,
+            'tipo_cana': tipo_cana,
+            'id_maquina': id_maquina,
+            'operador': operador
+        }
+        
+        # Adicionar à lista
+        colheitas.append(colheita)
+        
+        print(f"Colheita registrada com sucesso! Perda: {porcentagem_perda:.2f}%")
+        
+        # Se estiver usando banco, salvar
+        if usar_banco:
+            conn = conectar_banco()
+            if conn:
+                salvar_colheita_banco(conn, colheita)
+                conn.close()
+        
+        return colheita
+    except Exception as e:
+        print(f"Erro ao registrar colheita: {e}")
+        return None
+
+def salvar_colheitas_arquivo(arquivo="colheitas.json"):
+    """
+    Função para salvar as colheitas em um arquivo JSON
+    """
+    try:
+        # Converter os objetos datetime para string antes de salvar no JSON
+        colheitas_serializaveis = []
+        
+        for colheita in colheitas:
+            colheita_copy = colheita.copy()
+            if isinstance(colheita_copy['data_colheita'], datetime.date):
+                colheita_copy['data_colheita'] = colheita_copy['data_colheita'].strftime("%d/%m/%Y")
+            colheitas_serializaveis.append(colheita_copy)
+        
+        with open(arquivo, 'w', encoding='utf-8') as f:
+            json.dump(colheitas_serializaveis, f, ensure_ascii=False, indent=4)
+        
+        print(f"Dados salvos com sucesso no arquivo {arquivo}")
+        return True
+    except Exception as e:
+        print(f"Erro ao salvar arquivo: {e}")
+        return False
+
+def carregar_colheitas_arquivo(arquivo="colheitas.json"):
+    """
+    Função para carregar as colheitas de um arquivo JSON
+    """
+    try:
+        if not os.path.exists(arquivo):
+            print(f"Arquivo {arquivo} não existe. Nenhum dado carregado.")
+            return False
+        
+        with open(arquivo, 'r', encoding='utf-8') as f:
+            colheitas_carregadas = json.load(f)
+        
+        # Converter as strings de data para objetos datetime
+        for colheita in colheitas_carregadas:
+            if isinstance(colheita['data_colheita'], str):
+                colheita['data_colheita'] = datetime.datetime.strptime(
+                    colheita['data_colheita'], "%d/%m/%Y").date()
+        
+        # Atualizar a lista global
+        colheitas.clear()
+        colheitas.extend(colheitas_carregadas)
+        
+        print(f"Carregadas {len(colheitas)} colheitas do arquivo {arquivo}")
+        return True
+    except Exception as e:
+        print(f"Erro ao carregar arquivo: {e}")
+        return False
+
+def exportar_relatorio_txt(arquivo="relatorio_colheitas.txt"):
+    """
+    Função para exportar um relatório em formato de texto
+    """
+    try:
+        with open(arquivo, 'w', encoding='utf-8') as f:
+            f.write("RELATÓRIO DE COLHEITAS DE CANA-DE-AÇÚCAR\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write(f"Data do relatório: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
+            f.write(f"Total de colheitas registradas: {len(colheitas)}\n\n")
+            
+            # Calcular estatísticas
+            total_area = sum(c['area_hectares'] for c in colheitas)
+            total_producao = sum(c['producao_toneladas'] for c in colheitas)
+            total_perdas = sum(c['perdas_toneladas'] for c in colheitas)
+            
+            if total_producao + total_perdas > 0:
+                perda_media = (total_perdas / (total_producao + total_perdas)) * 100
+            else:
+                perda_media = 0
+            
+            f.write(f"Área total colhida: {total_area:.2f} hectares\n")
+            f.write(f"Produção total: {total_producao:.2f} toneladas\n")
+            f.write(f"Perdas totais: {total_perdas:.2f} toneladas\n")
+            f.write(f"Porcentagem média de perdas: {perda_media:.2f}%\n\n")
+            
+            f.write("DETALHAMENTO DAS COLHEITAS\n")
+            f.write("-" * 50 + "\n\n")
+            
+            # Ordenar colheitas por data
+            colheitas_ordenadas = sorted(colheitas, key=lambda c: c['data_colheita'], reverse=True)
+            
+            for i, colheita in enumerate(colheitas_ordenadas, 1):
+                data_str = colheita['data_colheita']
+                if isinstance(data_str, datetime.date):
+                    data_str = data_str.strftime("%d/%m/%Y")
+                
+                f.write(f"Colheita #{i}\n")
+                f.write(f"  Data: {data_str}\n")
+                f.write(f"  Área: {colheita['area_hectares']:.2f} hectares\n")
+                f.write(f"  Produção: {colheita['producao_toneladas']:.2f} toneladas\n")
+                f.write(f"  Perdas: {colheita['perdas_toneladas']:.2f} toneladas ({colheita['porcentagem_perda']:.2f}%)\n")
+                f.write(f"  Tipo de cana: {colheita['tipo_cana']}\n")
+                f.write(f"  Máquina ID: {colheita['id_maquina']}\n")
+                f.write(f"  Operador: {colheita['operador']}\n\n")
+            
+            f.write("\nRELATÓRIO DE EFICIÊNCIA POR MÁQUINA\n")
+            f.write("-" * 50 + "\n\n")
+            
+            # Agrupar colheitas por máquina
+            maquinas = {}
+            for colheita in colheitas:
+                id_maquina = colheita['id_maquina']
+                if id_maquina not in maquinas:
+                    maquinas[id_maquina] = {
+                        'total_area': 0,
+                        'total_producao': 0,
+                        'total_perdas': 0,
+                        'colheitas': 0
+                    }
+                
+                maquinas[id_maquina]['total_area'] += colheita['area_hectares']
+                maquinas[id_maquina]['total_producao'] += colheita['producao_toneladas']
+                maquinas[id_maquina]['total_perdas'] += colheita['perdas_toneladas']
+                maquinas[id_maquina]['colheitas'] += 1
+            
+            for id_maquina, stats in maquinas.items():
+                if stats['total_producao'] + stats['total_perdas'] > 0:
+                    perda_media = (stats['total_perdas'] / (stats['total_producao'] + stats['total_perdas'])) * 100
+                else:
+                    perda_media = 0
+                
+                f.write(f"Máquina ID: {id_maquina}\n")
+                f.write(f"  Total de colheitas: {stats['colheitas']}\n")
+                f.write(f"  Área total colhida: {stats['total_area']:.2f} hectares\n")
+                f.write(f"  Produção total: {stats['total_producao']:.2f} toneladas\n")
+                f.write(f"  Perdas totais: {stats['total_perdas']:.2f} toneladas\n")
+                f.write(f"  Porcentagem média de perdas: {perda_media:.2f}%\n\n")
+        
+        print(f"Relatório exportado com sucesso para {arquivo}")
+        return True
+    except Exception as e:
+        print(f"Erro ao exportar relatório: {e}")
+        return False
+
+def analisar_perdas():
+    """
+    Função para analisar os dados de perdas e fornecer insights
+    """
+    if not colheitas:
+        print("Não há colheitas registradas para análise.")
+        return
+    
+    print("\n=== Análise de Perdas na Colheita ===")
+    
+    # Estatísticas gerais
+    total_area = sum(c['area_hectares'] for c in colheitas)
+    total_producao = sum(c['producao_toneladas'] for c in colheitas)
+    total_perdas = sum(c['perdas_toneladas'] for c in colheitas)
+    
+    if total_producao + total_perdas > 0:
+        perda_media = (total_perdas / (total_producao + total_perdas)) * 100
+    else:
+        perda_media = 0
+    
+    print(f"Total de colheitas analisadas: {len(colheitas)}")
+    print(f"Área total colhida: {total_area:.2f} hectares")
+    print(f"Produção total: {total_producao:.2f} toneladas")
+    print(f"Perdas totais: {total_perdas:.2f} toneladas")
+    print(f"Porcentagem média de perdas: {perda_media:.2f}%")
+    
+    # Valor estimado da perda (considerando R$ 100 por tonelada de cana)
+    valor_perda = total_perdas * 100
+    print(f"Valor estimado das perdas: R$ {valor_perda:.2f}")
+    
+    # Análise por máquina
+    print("\n=== Análise por Máquina ===")
+    
+    maquinas = {}
+    for colheita in colheitas:
+        id_maquina = colheita['id_maquina']
+        if id_maquina not in maquinas:
+            maquinas[id_maquina] = {
+                'colheitas': 0,
+                'total_producao': 0,
+                'total_perdas': 0
+            }
+        
+        maquinas[id_maquina]['colheitas'] += 1
+        maquinas[id_maquina]['total_producao'] += colheita['producao_toneladas']
+        maquinas[id_maquina]['total_perdas'] += colheita['perdas_toneladas']
+    
+    # Ordenar máquinas por porcentagem de perda
+    maquinas_ordenadas = []
+    for id_maquina, stats in maquinas.items():
+        total = stats['total_producao'] + stats['total_perdas']
+        if total > 0:
+            porcentagem_perda = (stats['total_perdas'] / total) * 100
+        else:
+            porcentagem_perda = 0
+        
+        maquinas_ordenadas.append({
+            'id': id_maquina,
+            'colheitas': stats['colheitas'],
+            'perda_porcentagem': porcentagem_perda,
+            'total_perdas': stats['total_perdas']
+        })
+    
+    maquinas_ordenadas.sort(key=lambda m: m['perda_porcentagem'], reverse=True)
+    
+    for maquina in maquinas_ordenadas:
+        print(f"Máquina ID: {maquina['id']}")
+        print(f"  Colheitas realizadas: {maquina['colheitas']}")
+        print(f"  Porcentagem de perda: {maquina['perda_porcentagem']:.2f}%")
+        print(f"  Total de perdas: {maquina['total_perdas']:.2f} toneladas")
+        
+        if maquina['perda_porcentagem'] > 10:
+            print("  ⚠️ ALERTA: Perda acima do limite recomendado de 10%")
+            
+        print()
+    
+    # Recomendações baseadas na análise
+    print("\n=== Recomendações ===")
+    
+    if perda_media > 10:
+        print("⚠️ A perda média está acima do limite recomendado de 10%.")
+        print("Recomendações:")
+        print("1. Revisar a configuração das colhedoras")
+        print("2. Verificar a velocidade de colheita")
+        print("3. Analisar o ângulo de corte dos discos")
+        print("4. Realizar treinamento adicional com os operadores")
+    else:
+        print("✅ A perda média está dentro dos limites aceitáveis.")
+        print("Recomendações para manter ou melhorar os resultados:")
+        print("1. Manter o cronograma de manutenção das colhedoras")
+        print("2. Continuar monitorando as perdas regularmente")
+    
+    # Identificar máquinas problemáticas
+    maquinas_problematicas = [m for m in maquinas_ordenadas if m['perda_porcentagem'] > 12]
+    if maquinas_problematicas:
+        print("\nMáquinas com perdas críticas (acima de 12%):")
+        for maquina in maquinas_problematicas:
+            print(f"- Máquina ID: {maquina['id']} - {maquina['perda_porcentagem']:.2f}%")
+        print("Recomendação: Agendar manutenção preventiva para estas máquinas.")
+
+def menu_principal():
+    """
+    Procedimento para exibir o menu principal
+    """
+    print("\n" + "=" * 50)
+    print("   SISTEMA DE GESTÃO DE PERDAS NA COLHEITA DE CANA")
+    print("=" * 50)
+    print("1. Registrar nova colheita")
+    print("2. Visualizar colheitas registradas")
+    print("3. Analisar perdas")
+    print("4. Exportar relatório (TXT)")
+    print("5. Salvar dados (JSON)")
+    print("6. Carregar dados (JSON)")
+    print("7. Opções de banco de dados")
+    print("0. Sair")
+    print("=" * 50)
+
+def menu_banco():
+    """
+    Procedimento para exibir o menu de operações com banco de dados
+    """
+    print("\n" + "=" * 50)
+    print("   OPERAÇÕES COM BANCO DE DADOS")
+    print("=" * 50)
+    print("1. Conectar ao banco")
+    print("2. Criar tabelas")
+    print("3. Carregar colheitas do banco")
+    print("4. Salvar colheitas no banco")
+    print("0. Voltar")
+    print("=" * 50)
+
+def visualizar_colheitas():
+    """
+    Procedimento para visualizar as colheitas registradas
+    """
+    if not colheitas:
+        print("Não há colheitas registradas.")
+        return
+    
+    print("\n=== Colheitas Registradas ===")
+    
+    # Ordenar por data
+    colheitas_ordenadas = sorted(colheitas, key=lambda c: c['data_colheita'], reverse=True)
+    
+    for i, colheita in enumerate(colheitas_ordenadas, 1):
+        data_str = colheita['data_colheita']
+        if isinstance(data_str, datetime.date):
+            data_str = data_str.strftime("%d/%m/%Y")
+        
+        print(f"\nColheita #{i}")
+        print(f"  Data: {data_str}")
+        print(f"  Área: {colheita['area_hectares']:.2f} hectares")
+        print(f"  Produção: {colheita['producao_toneladas']:.2f} toneladas")
+        print(f"  Perdas: {colheita['perdas_toneladas']:.2f} toneladas ({colheita['porcentagem_perda']:.2f}%)")
+        print(f"  Tipo de cana: {colheita['tipo_cana']}")
+        print(f"  Máquina ID: {colheita['id_maquina']}")
+        print(f"  Operador: {colheita['operador']}")
+
+# Programa principal
+def main():
+    # Carregar dados salvos, se existirem
+    carregar_colheitas_arquivo()
+    
+    while True:
+        menu_principal()
+        escolha = input("Escolha uma opção: ")
+        
+        if escolha == "1":
+            registrar_colheita()
+        
+        elif escolha == "2":
+            visualizar_colheitas()
+        
+        elif escolha == "3":
+            analisar_perdas()
+        
+        elif escolha == "4":
+            nome_arquivo = input("Nome do arquivo de relatório (padrão: relatorio_colheitas.txt): ")
+            if not nome_arquivo.strip():
+                nome_arquivo = "relatorio_colheitas.txt"
+            exportar_relatorio_txt(nome_arquivo)
+        
+        elif escolha == "5":
+            nome_arquivo = input("Nome do arquivo para salvar (padrão: colheitas.json): ")
+            if not nome_arquivo.strip():
+                nome_arquivo = "colheitas.json"
+            salvar_colheitas_arquivo(nome_arquivo)
+        
+        elif escolha == "6":
+            nome_arquivo = input("Nome do arquivo para carregar (padrão: colheitas.json): ")
+            if not nome_arquivo.strip():
+                nome_arquivo = "colheitas.json"
+            carregar_colheitas_arquivo(nome_arquivo)
+        
+        elif escolha == "7":
+            while True:
+                menu_banco()
+                escolha_banco = input("Escolha uma opção: ")
+                
+                if escolha_banco == "1":
+                    conn = conectar_banco()
+                    if conn:
+                        conn.close()
+                
+                elif escolha_banco == "2":
+                    conn = conectar_banco()
+                    if conn:
+                        criar_tabelas(conn)
+                        conn.close()
+                
+                elif escolha_banco == "3":
+                    conn = conectar_banco()
+                    if conn:
+                        colheitas_banco = carregar_colheitas_banco(conn)
+                        if colheitas_banco:
+                            colheitas.clear()
+                            colheitas.extend(colheitas_banco)
+                        conn.close()
+                
+                elif escolha_banco == "4":
+                    if not colheitas:
+                        print("Não há colheitas para salvar no banco.")
+                    else:
+                        conn = conectar_banco()
+                        if conn:
+                            for colheita in colheitas:
+                                salvar_colheita_banco(conn, colheita)
+                            conn.close()
+                
+                elif escolha_banco == "0":
+                    break
+                
+                else:
+                    print("Opção inválida!")
+        
+        elif escolha == "0":
+            print("Salvando dados antes de sair...")
+            salvar_colheitas_arquivo()
+            print("Obrigado por usar o Sistema de Gestão de Perdas na Colheita de Cana!")
+            break
+        
+        else:
+            print("Opção inválida!")
+
+if __name__ == "__main__":
+    main()
